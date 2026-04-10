@@ -84,7 +84,7 @@ export default function App() {
       )}
 
       {tab === 'chart' && (
-        <ChartView imbalances={imbalances} />
+        <ChartView imbalances={imbalances} prices={prices} />
       )}
 
       {tab === 'add' && (
