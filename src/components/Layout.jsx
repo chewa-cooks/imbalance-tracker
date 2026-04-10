@@ -1,6 +1,6 @@
 const TABS = [
   { id: 'dashboard', label: 'Dashboard' },
-  { id: 'chart',     label: 'Chart' },
+  { id: 'volume',    label: 'Pre-Mkt Vol' },
   { id: 'add',       label: '+ Add Level' },
   { id: 'alerts',    label: 'Alerts' },
 ]

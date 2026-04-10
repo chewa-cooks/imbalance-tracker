@@ -1,12 +1,13 @@
 import { useState, useMemo } from 'react'
 import Layout from './components/Layout'
 import Dashboard from './components/Dashboard'
-import ChartView from './components/ChartView'
+import VolumeTracker from './components/VolumeTracker'
 import ImbalanceForm from './components/ImbalanceForm'
 import AlertSettings from './components/AlertSettings'
 import { useImbalances } from './hooks/useImbalances'
 import { useMarketPrice } from './hooks/useMarketPrice'
 import { useAlerts } from './hooks/useAlerts'
+import { useOvernightVolume } from './hooks/useOvernightVolume'
 import { enrichImbalance, findOverlappingIds } from './lib/signalEngine'
 
 export default function App() {
@@ -15,8 +16,8 @@ export default function App() {
 
   const { imbalances, loading, error, addImbalance, updateImbalance, deleteImbalance, archiveImbalance } = useImbalances()
   const { prices, lastUpdated, priceError } = useMarketPrice()
+  const { records, logVolume, deleteRecord } = useOvernightVolume()
 
-  // Enrich imbalances for alert evaluation
   const enriched = useMemo(() => {
     const active = imbalances.filter((im) => im.status === 'ACTIVE')
     const overlappingIds = findOverlappingIds(active)
@@ -34,11 +35,8 @@ export default function App() {
   }
 
   const handleSave = async (fields, id) => {
-    if (id) {
-      await updateImbalance(id, fields)
-    } else {
-      await addImbalance(fields)
-    }
+    if (id) await updateImbalance(id, fields)
+    else await addImbalance(fields)
     setEditImbalance(null)
     setTab('dashboard')
   }
@@ -57,7 +55,7 @@ export default function App() {
     <Layout activeTab={tab} onTabChange={handleTabChange}>
       {loading && (
         <div className="flex items-center justify-center h-40 text-gray-600 text-sm animate-pulse">
-          Loading imbalances…
+          Loading…
         </div>
       )}
 
@@ -83,8 +81,12 @@ export default function App() {
         />
       )}
 
-      {tab === 'chart' && (
-        <ChartView imbalances={imbalances} prices={prices} />
+      {tab === 'volume' && (
+        <VolumeTracker
+          records={records}
+          onLog={logVolume}
+          onDelete={deleteRecord}
+        />
       )}
 
       {tab === 'add' && (

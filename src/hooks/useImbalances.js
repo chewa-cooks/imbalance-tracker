@@ -11,7 +11,7 @@ export function useImbalances() {
     const { data, error } = await supabase
       .from('imbalances')
       .select('*')
-      .order('created_at', { ascending: false })
+      .order('date_formed', { ascending: false })
 
     if (error) {
       setError(error.message)
