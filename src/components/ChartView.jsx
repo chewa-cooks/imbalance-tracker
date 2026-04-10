@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createChart, CandlestickSeries, LineStyle } from 'lightweight-charts'
-import { fetchOHLC, TF_LABEL } from '../lib/yahoo'
+import { fetchOHLC } from '../lib/polygon'
 import { calcMidpoint } from '../lib/signalEngine'
 
 const TICKERS = ['SPX', 'SPY', 'QQQ']

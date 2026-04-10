@@ -46,27 +46,28 @@ export async function fetchPrices() {
 export async function fetchOHLC(ticker, timeframe) {
   const chartTicker = CHART_TICKER[ticker] || ticker
   const tf = TF_MAP[timeframe]
-  if (!tf) return []
+  if (!tf) throw new Error(`Unknown timeframe: ${timeframe}`)
 
   const today = new Date()
   const from = new Date(today)
 
-  // Look back enough bars
-  if (timeframe === '15m') from.setDate(from.getDate() - 5)
-  else if (timeframe === '4H') from.setDate(from.getDate() - 30)
-  else from.setFullYear(from.getFullYear() - 1)
+  // Look back generously to cover weekends + holidays
+  if (timeframe === '15m') from.setDate(from.getDate() - 14)
+  else if (timeframe === '4H') from.setDate(from.getDate() - 60)
+  else from.setFullYear(from.getFullYear() - 2)
 
   const fmt = (d) => d.toISOString().split('T')[0]
 
-  const url = `${BASE}/v2/aggs/ticker/${chartTicker}/range/${tf.multiplier}/${tf.timespan}/${fmt(from)}/${fmt(today)}?adjusted=true&sort=asc&limit=500&apiKey=${API_KEY}`
+  const url = `${BASE}/v2/aggs/ticker/${chartTicker}/range/${tf.multiplier}/${tf.timespan}/${fmt(from)}/${fmt(today)}?adjusted=true&sort=asc&limit=5000&apiKey=${API_KEY}`
 
   const res = await fetch(url)
   const data = await res.json()
 
-  if (!data.results) return []
+  if (data.status === 'ERROR') throw new Error(data.error || 'Polygon API error')
+  if (!data.results?.length) throw new Error(`No bars returned for ${chartTicker} ${timeframe} — market may be closed`)
 
   return data.results.map((bar) => ({
-    time: Math.floor(bar.t / 1000), // Polygon uses ms, lightweight-charts uses seconds
+    time: Math.floor(bar.t / 1000),
     open: bar.o,
     high: bar.h,
     low: bar.l,
