@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 
 // Default thresholds (user-adjustable in component state)
 const DEFAULT_THRESHOLDS = {
@@ -116,6 +116,54 @@ export default function VolumeTracker({ records, onLog, onDelete, loading }) {
   const [saveError, setSaveError] = useState(null)
   const [thresholds, setThresholds] = useState(DEFAULT_THRESHOLDS)
   const [showThresh, setShowThresh] = useState(false)
+  const [fetching, setFetching] = useState(false)
+  const [fetchStatus, setFetchStatus] = useState(null) // { ok: bool, message: string }
+
+  const autoFetch = useCallback(async () => {
+    setFetching(true)
+    setFetchStatus(null)
+    try {
+      const res = await fetch('/api/overnight-volume')
+      if (!res.ok) throw new Error(`Server returned ${res.status}`)
+      const data = await res.json()
+
+      const updates = {}
+      const warnings = []
+
+      if (data.spx && !data.spx.error) {
+        updates.spx_vol = data.spx.millions?.toString() || ''
+      } else {
+        warnings.push(`SPX: ${data.spx?.error || 'unavailable'}`)
+      }
+
+      if (data.es && !data.es.error) {
+        updates.es_vol = Math.round((data.es.contracts || 0) / 1000).toString()
+      } else {
+        warnings.push(`ES: ${data.es?.error || 'unavailable'}`)
+      }
+
+      if (data.nq && !data.nq.error) {
+        updates.nq_vol = Math.round((data.nq.contracts || 0) / 1000).toString()
+      } else {
+        warnings.push(`NQ: ${data.nq?.error || 'unavailable'}`)
+      }
+
+      setForm((f) => ({ ...f, ...updates }))
+      setFetchStatus({
+        ok: warnings.length < 3,
+        message: warnings.length
+          ? `Partial: ${warnings.join(' · ')}`
+          : '✓ All fields populated — review and log',
+      })
+    } catch (e) {
+      setFetchStatus({
+        ok: false,
+        message: `Auto-fetch failed: ${e.message}. Only works on deployed Vercel URL, not localhost.`,
+      })
+    } finally {
+      setFetching(false)
+    }
+  }, [])
 
   const set = (f) => (e) => setForm((p) => ({ ...p, [f]: e.target.value }))
 
@@ -222,7 +270,29 @@ export default function VolumeTracker({ records, onLog, onDelete, loading }) {
 
       {/* Log form */}
       <div className="rounded-lg border border-[#1f2133] bg-[#0e0f15] p-4">
-        <div className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-4">Log Session</div>
+        <div className="flex items-center justify-between mb-4">
+          <div className="text-xs font-bold text-gray-500 uppercase tracking-widest">Log Session</div>
+          <button
+            onClick={autoFetch}
+            disabled={fetching}
+            className="flex items-center gap-2 px-4 py-1.5 bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/30 text-blue-400 text-xs font-bold rounded transition-colors disabled:opacity-50"
+          >
+            {fetching ? (
+              <><span className="animate-spin">⟳</span> Fetching…</>
+            ) : (
+              <><span>⬇</span> Auto-Fetch</>
+            )}
+          </button>
+        </div>
+        {fetchStatus && (
+          <div className={`text-xs mb-3 px-3 py-2 rounded border ${
+            fetchStatus.ok
+              ? 'text-emerald-400 bg-emerald-900/20 border-emerald-800/30'
+              : 'text-yellow-400 bg-yellow-900/20 border-yellow-800/30'
+          }`}>
+            {fetchStatus.message}
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-3">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div>
