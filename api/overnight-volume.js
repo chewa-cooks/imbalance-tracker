@@ -1,116 +1,112 @@
 // Vercel serverless function — runs server-side, no CORS issues
-// Fetches overnight/pre-market volume from Cboe (SPX) and CME (ES, NQ)
+// SPX: Cboe CDN JSON  |  ES + NQ: Yahoo Finance futures (ES=F, NQ=F)
 
-const HEADERS = {
+const BROWSER_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept': 'application/json, text/plain, */*',
   'Accept-Language': 'en-US,en;q=0.9',
 }
 
-// Parse a number string like "1,234,567" → 1234567
-function parseNum(str) {
-  if (!str) return null
-  const n = parseFloat(str.replace(/,/g, ''))
-  return isNaN(n) ? null : n
-}
-
-// ── SPX Options Volume via Cboe ──────────────────────────────────────────────
+// ── SPX Options Volume via Cboe CDN ─────────────────────────────────────────
 async function fetchCboeSpxVolume() {
-  // Cboe publishes daily market stats as a publicly accessible page
-  const url = 'https://www.cboe.com/us/options/market_statistics/daily/'
-  const res = await fetch(url, { headers: HEADERS })
-  if (!res.ok) throw new Error(`Cboe returned HTTP ${res.status}`)
-
-  const html = await res.text()
-
-  // Cboe's page has a table. SPX row typically looks like:
-  // <td ...>SPX</td><td ...>1,234,567</td>...
-  // Try several regex patterns to find it
-  const patterns = [
-    /SPX<\/td>\s*<td[^>]*>\s*([\d,]+)/i,
-    />SPX<[^>]+>\s*<[^>]+>\s*([\d,]+)/i,
-    /["']SPX["'][^}]*volume["']:\s*([\d.]+)/i,
-    /SPX.*?([\d]{1,3}(?:,[\d]{3})+)/,
+  // Cboe publishes daily exchange volume as JSON on their CDN
+  const endpoints = [
+    'https://cdn.cboe.com/api/global/us_options_market_statistics/daily_market_statistics.json',
+    'https://cdn.cboe.com/api/global/us_options_market_statistics/market_statistics.json',
   ]
 
-  for (const pat of patterns) {
-    const m = html.match(pat)
-    if (m) {
-      const raw = parseNum(m[1])
-      if (raw && raw > 10000) {
-        // Convert raw contract count to $M notional (rough: SPX ~$50 per contract value unit)
-        // Cboe shows total contracts — return as-is in thousands for the user to interpret
-        return { contracts: raw, millions: Math.round(raw / 1000 * 10) / 10 }
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, { headers: BROWSER_HEADERS })
+      if (!res.ok) continue
+      const data = await res.json()
+
+      // Navigate common Cboe JSON shapes
+      const rows = data?.data || data?.market_statistics || data?.records || []
+      const spx = Array.isArray(rows) && rows.find((r) =>
+        r?.symbol === 'SPX' || r?.product === 'SPX' || r?.ticker === 'SPX' || r?.name === 'SPX'
+      )
+
+      if (spx) {
+        const contracts = spx.volume ?? spx.total_volume ?? spx.call_volume + spx.put_volume ?? null
+        if (contracts && contracts > 1000) {
+          // Express as $M notional (SPX options are ~$100 multiplier, rough conversion)
+          const millions = Math.round((contracts * 100) / 1_000_000 * 10) / 10
+          return { contracts, millions, source: url }
+        }
+      }
+    } catch {}
+  }
+
+  // Last resort: try OCC daily volume report (CSV, look for SPX row)
+  const today = new Date()
+  const ymd = `${today.getFullYear()}${String(today.getMonth()+1).padStart(2,'0')}${String(today.getDate()).padStart(2,'0')}`
+  const occUrl = `https://www.theocc.com/webapps/intraday-volume-download?reportDate=${ymd}`
+  try {
+    const r = await fetch(occUrl, { headers: BROWSER_HEADERS })
+    if (r.ok) {
+      const csv = await r.text()
+      const line = csv.split('\n').find((l) => l.startsWith('SPX,') || l.includes(',SPX,'))
+      if (line) {
+        const cols = line.split(',')
+        const vol = parseInt(cols.find((c) => /^\d{4,}$/.test(c.trim())))
+        if (vol > 1000) {
+          const millions = Math.round((vol * 100) / 1_000_000 * 10) / 10
+          return { contracts: vol, millions, source: 'occ' }
+        }
       }
     }
-  }
+  } catch {}
 
-  // Fallback: try Cboe's CDN JSON endpoint
-  const jsonUrl = 'https://cdn.cboe.com/api/global/us_options_market_statistics/daily_market_statistics.json'
-  const jr = await fetch(jsonUrl, { headers: HEADERS })
-  if (jr.ok) {
-    const data = await jr.json()
-    // Look for SPX in the data
-    const spx = data?.data?.find?.((d) => d.symbol === 'SPX' || d.ticker === 'SPX')
-    if (spx) {
-      const vol = spx.volume || spx.totalVolume || spx.call_volume + spx.put_volume
-      if (vol) return { contracts: vol, millions: Math.round(vol / 1000 * 10) / 10 }
-    }
-  }
-
-  throw new Error('Could not parse SPX volume from Cboe — page structure may have changed')
+  throw new Error('Cboe CDN and OCC returned no parseable SPX data — enter manually')
 }
 
-// ── ES Futures Volume via CME ────────────────────────────────────────────────
-async function fetchCmeFuturesVolume(symbol) {
-  // CME Group publishes volume data via their web API
-  const today = new Date()
-  const fmt = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
-  const dateStr = fmt(today)
+// ── ES / NQ Futures Volume via Yahoo Finance ──────────────────────────────────
+// ES=F and NQ=F are the front-month E-mini futures tickers on Yahoo
+async function fetchYahooFuturesVolume(ticker) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=5d&includePrePost=false`
+  const res = await fetch(url, {
+    headers: {
+      ...BROWSER_HEADERS,
+      'Accept': 'application/json',
+    },
+  })
 
-  // CME's volume endpoint (reverse engineered from their website)
-  const url = `https://www.cmegroup.com/CmeWS/mvc/Volume/Summary/I?tradeDate=${dateStr}&exchange=CME`
-  const res = await fetch(url, { headers: { ...HEADERS, 'Referer': 'https://www.cmegroup.com/' } })
+  if (!res.ok) throw new Error(`Yahoo Finance returned HTTP ${res.status} for ${ticker}`)
 
-  if (!res.ok) throw new Error(`CME returned HTTP ${res.status}`)
   const data = await res.json()
+  const result = data?.chart?.result?.[0]
+  if (!result) throw new Error(`No chart data for ${ticker}`)
 
-  // CME response has an array of products
-  const items = data?.volumeSummary || data?.items || data || []
-  const row = Array.isArray(items) && items.find((r) =>
-    r.productName?.includes(symbol) || r.name?.includes(symbol) || r.globexCode === symbol
-  )
+  const volumes = result.indicators?.quote?.[0]?.volume || []
+  // Get the most recent non-null volume (may include today's partial)
+  const recent = [...volumes].reverse().find((v) => v != null && v > 0)
+  if (!recent) throw new Error(`No volume data for ${ticker}`)
 
-  if (row) {
-    const vol = parseNum(String(row.volume || row.totalVolume || row.globexVol || ''))
-    if (vol) return vol
-  }
-  throw new Error(`Could not find ${symbol} in CME response`)
+  return recent // raw contracts
 }
 
 // ── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*')
-  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600') // cache 5 min
+  res.setHeader('Cache-Control', 's-maxage=300, stale-while-revalidate=600')
 
   const [spxResult, esResult, nqResult] = await Promise.allSettled([
     fetchCboeSpxVolume(),
-    fetchCmeFuturesVolume('E-Mini S&P'),
-    fetchCmeFuturesVolume('E-Mini Nasdaq'),
+    fetchYahooFuturesVolume('ES=F'),
+    fetchYahooFuturesVolume('NQ=F'),
   ])
 
-  const out = {
+  res.json({
     timestamp: new Date().toISOString(),
     spx: spxResult.status === 'fulfilled'
-      ? { ...spxResult.value, source: 'cboe' }
+      ? { millions: spxResult.value.millions, contracts: spxResult.value.contracts, source: spxResult.value.source }
       : { error: spxResult.reason?.message },
     es: esResult.status === 'fulfilled'
-      ? { contracts: esResult.value, source: 'cme' }
+      ? { contracts: esResult.value, thousands: Math.round(esResult.value / 1000), source: 'yahoo-ES=F' }
       : { error: esResult.reason?.message },
     nq: nqResult.status === 'fulfilled'
-      ? { contracts: nqResult.value, source: 'cme' }
+      ? { contracts: nqResult.value, thousands: Math.round(nqResult.value / 1000), source: 'yahoo-NQ=F' }
       : { error: nqResult.reason?.message },
-  }
-
-  res.json(out)
+  })
 }

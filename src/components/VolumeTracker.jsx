@@ -137,13 +137,13 @@ export default function VolumeTracker({ records, onLog, onDelete, loading }) {
       }
 
       if (data.es && !data.es.error) {
-        updates.es_vol = Math.round((data.es.contracts || 0) / 1000).toString()
+        updates.es_vol = (data.es.thousands || Math.round((data.es.contracts || 0) / 1000)).toString()
       } else {
         warnings.push(`ES: ${data.es?.error || 'unavailable'}`)
       }
 
       if (data.nq && !data.nq.error) {
-        updates.nq_vol = Math.round((data.nq.contracts || 0) / 1000).toString()
+        updates.nq_vol = (data.nq.thousands || Math.round((data.nq.contracts || 0) / 1000)).toString()
       } else {
         warnings.push(`NQ: ${data.nq?.error || 'unavailable'}`)
       }
