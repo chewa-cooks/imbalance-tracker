@@ -1,121 +1,107 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useState, useMemo } from 'react'
+import Layout from './components/Layout'
+import Dashboard from './components/Dashboard'
+import ChartView from './components/ChartView'
+import ImbalanceForm from './components/ImbalanceForm'
+import AlertSettings from './components/AlertSettings'
+import { useImbalances } from './hooks/useImbalances'
+import { useMarketPrice } from './hooks/useMarketPrice'
+import { useAlerts } from './hooks/useAlerts'
+import { enrichImbalance, findOverlappingIds } from './lib/signalEngine'
 
-function App() {
-  const [count, setCount] = useState(0)
+export default function App() {
+  const [tab, setTab] = useState('dashboard')
+  const [editImbalance, setEditImbalance] = useState(null)
+
+  const { imbalances, loading, error, addImbalance, updateImbalance, deleteImbalance, archiveImbalance } = useImbalances()
+  const { prices, lastUpdated, priceError } = useMarketPrice()
+
+  // Enrich imbalances for alert evaluation
+  const enriched = useMemo(() => {
+    const active = imbalances.filter((im) => im.status === 'ACTIVE')
+    const overlappingIds = findOverlappingIds(active)
+    return imbalances.map((im) => {
+      const price = prices[im.ticker]?.price || prices.SPY?.price || 0
+      return enrichImbalance(im, price, imbalances, overlappingIds, 0.3)
+    })
+  }, [imbalances, prices])
+
+  const { settings, saveSettings, requestPermission } = useAlerts(enriched)
+
+  const handleEdit = (im) => {
+    setEditImbalance(im)
+    setTab('add')
+  }
+
+  const handleSave = async (fields, id) => {
+    if (id) {
+      await updateImbalance(id, fields)
+    } else {
+      await addImbalance(fields)
+    }
+    setEditImbalance(null)
+    setTab('dashboard')
+  }
+
+  const handleCancel = () => {
+    setEditImbalance(null)
+    setTab('dashboard')
+  }
+
+  const handleTabChange = (newTab) => {
+    if (newTab !== 'add') setEditImbalance(null)
+    setTab(newTab)
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+    <Layout activeTab={tab} onTabChange={handleTabChange}>
+      {loading && (
+        <div className="flex items-center justify-center h-40 text-gray-600 text-sm animate-pulse">
+          Loading imbalances…
         </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+      )}
 
-      <div className="ticks"></div>
-
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+      {error && (
+        <div className="rounded-lg border border-red-800/30 bg-red-900/20 text-red-400 text-sm px-4 py-3 mb-4">
+          Supabase error: {error}
+          <div className="text-xs mt-1 text-red-500">
+            Make sure you ran the SQL to create the imbalances table in your Supabase project.
+          </div>
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      )}
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      {!loading && tab === 'dashboard' && (
+        <Dashboard
+          imbalances={imbalances}
+          prices={prices}
+          lastUpdated={lastUpdated}
+          priceError={priceError}
+          onEdit={handleEdit}
+          onArchive={archiveImbalance}
+          onDelete={deleteImbalance}
+          alertThreshold={settings.threshold}
+        />
+      )}
+
+      {tab === 'chart' && (
+        <ChartView imbalances={imbalances} />
+      )}
+
+      {tab === 'add' && (
+        <ImbalanceForm
+          editImbalance={editImbalance}
+          onSave={handleSave}
+          onCancel={editImbalance ? handleCancel : null}
+        />
+      )}
+
+      {tab === 'alerts' && (
+        <AlertSettings
+          settings={settings}
+          onSave={saveSettings}
+          onRequestPermission={requestPermission}
+        />
+      )}
+    </Layout>
   )
 }
-
-export default App
