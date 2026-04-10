@@ -1,92 +1,150 @@
-import { useEffect, useRef, useState, useMemo } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createChart, CandlestickSeries, LineStyle } from 'lightweight-charts'
+import { fetchOHLC, TF_LABEL } from '../lib/yahoo'
 import { calcMidpoint } from '../lib/signalEngine'
 
 const TICKERS = ['SPX', 'SPY', 'QQQ']
-const TIMEFRAMES = [
-  { label: '15m', tv: '15' },
-  { label: '1H',  tv: '60' },
-  { label: '4H',  tv: '240' },
-  { label: '1D',  tv: 'D' },
-  { label: '1W',  tv: 'W' },
-]
+const TIMEFRAMES = ['15m', '4H', '1D']
 
-// TradingView symbol mapping
-const TV_SYMBOL = { SPX: 'SP:SPX', SPY: 'AMEX:SPY', QQQ: 'NASDAQ:QQQ' }
-
-let widgetCounter = 0
-
-export default function ChartView({ imbalances, prices }) {
+export default function ChartView({ imbalances }) {
   const containerRef = useRef(null)
-  const widgetRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+  const priceLines = useRef([])
 
   const [ticker, setTicker] = useState('SPY')
-  const [timeframe, setTimeframe] = useState('15')
+  const [timeframe, setTimeframe] = useState('15m')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
 
-  // Load TradingView widget script once
+  // Init chart once
   useEffect(() => {
-    if (document.getElementById('tv-script')) return
-    const script = document.createElement('script')
-    script.id = 'tv-script'
-    script.src = 'https://s3.tradingview.com/tv.js'
-    script.async = true
-    document.head.appendChild(script)
-  }, [])
-
-  // (Re-)init widget when ticker or timeframe changes
-  useEffect(() => {
-    const containerId = `tv-chart-${++widgetCounter}`
     if (!containerRef.current) return
 
-    // Clear previous widget
-    containerRef.current.innerHTML = `<div id="${containerId}" style="height:100%"></div>`
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height: 520,
+      layout: {
+        background: { color: '#0a0b10' },
+        textColor: '#6b7280',
+      },
+      grid: {
+        vertLines: { color: '#1a1b26' },
+        horzLines: { color: '#1a1b26' },
+      },
+      rightPriceScale: { borderColor: '#1f2133' },
+      timeScale: {
+        borderColor: '#1f2133',
+        timeVisible: true,
+        secondsVisible: false,
+      },
+      crosshair: {
+        vertLine: { color: '#374151', labelBackgroundColor: '#1f2133' },
+        horzLine: { color: '#374151', labelBackgroundColor: '#1f2133' },
+      },
+    })
 
-    const init = () => {
-      if (!window.TradingView) return
-      widgetRef.current = new window.TradingView.widget({
-        autosize: true,
-        symbol: TV_SYMBOL[ticker] || ticker,
-        interval: timeframe,
-        timezone: 'America/New_York',
-        theme: 'dark',
-        style: '1',
-        locale: 'en',
-        toolbar_bg: '#0a0b10',
-        enable_publishing: false,
-        hide_top_toolbar: false,
-        hide_legend: false,
-        save_image: true,
-        container_id: containerId,
-        studies: [],
-        overrides: {
-          'paneProperties.background': '#0a0b10',
-          'paneProperties.backgroundType': 'solid',
-          'scalesProperties.textColor': '#6b7280',
-        },
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: '#34d399',
+      downColor: '#f87171',
+      borderVisible: false,
+      wickUpColor: '#34d399',
+      wickDownColor: '#f87171',
+    })
+
+    chartRef.current = chart
+    seriesRef.current = series
+
+    const handleResize = () => {
+      if (containerRef.current) {
+        chart.applyOptions({ width: containerRef.current.clientWidth })
+      }
+    }
+    window.addEventListener('resize', handleResize)
+
+    return () => {
+      window.removeEventListener('resize', handleResize)
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = null
+    }
+  }, [])
+
+  // Fetch OHLC from Yahoo Finance when ticker/tf changes
+  useEffect(() => {
+    if (!seriesRef.current) return
+    setLoading(true)
+    setError(null)
+
+    fetchOHLC(ticker, timeframe)
+      .then((bars) => {
+        if (!seriesRef.current) return
+        seriesRef.current.setData(bars)
+        chartRef.current?.timeScale().fitContent()
       })
-    }
-
-    if (window.TradingView) {
-      init()
-    } else {
-      // Wait for script to load
-      const script = document.getElementById('tv-script')
-      const onLoad = () => init()
-      script?.addEventListener('load', onLoad)
-      return () => script?.removeEventListener('load', onLoad)
-    }
+      .catch((e) => {
+        setError(`Failed to load chart data: ${e.message}`)
+      })
+      .finally(() => setLoading(false))
   }, [ticker, timeframe])
 
-  // Imbalances relevant to selected ticker — all timeframes
-  const relevantLevels = useMemo(() => {
-    return imbalances
-      .filter((im) => im.ticker === ticker && im.status === 'ACTIVE')
-      .map((im) => ({ ...im, midpoint: calcMidpoint(im.candle_high, im.candle_low) }))
-      .sort((a, b) => b.midpoint - a.midpoint)
-  }, [imbalances, ticker])
+  // Draw imbalance zones whenever imbalances or ticker/tf changes
+  useEffect(() => {
+    if (!seriesRef.current) return
 
-  const currentPrice = prices?.[ticker]?.price || prices?.SPY?.price
+    // Clear previous lines
+    priceLines.current.forEach((pl) => {
+      try { seriesRef.current?.removePriceLine(pl) } catch {}
+    })
+    priceLines.current = []
 
-  const tfLabel = TIMEFRAMES.find((t) => t.tv === timeframe)?.label || timeframe
+    // Draw ALL active imbalances for this ticker across all timeframes
+    const relevant = imbalances.filter(
+      (im) => im.ticker === ticker && im.status === 'ACTIVE'
+    )
+
+    for (const im of relevant) {
+      const mid = calcMidpoint(im.candle_high, im.candle_low)
+      const isBull = im.direction === 'BULLISH'
+      const midColor   = isBull ? '#34d399' : '#f87171'
+      const edgeColor  = isBull ? '#1d4e3a' : '#4e1d1d'
+      const tfTag = im.timeframe
+
+      // Zone top edge
+      priceLines.current.push(seriesRef.current.createPriceLine({
+        price: im.candle_high,
+        color: edgeColor,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: false,
+        title: '',
+      }))
+
+      // Zone bottom edge
+      priceLines.current.push(seriesRef.current.createPriceLine({
+        price: im.candle_low,
+        color: edgeColor,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: false,
+        title: '',
+      }))
+
+      // 50% midpoint — the key line
+      priceLines.current.push(seriesRef.current.createPriceLine({
+        price: mid,
+        color: midColor,
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `${tfTag} ${isBull ? '▲' : '▼'} 50%`,
+      }))
+    }
+  }, [imbalances, ticker, timeframe])
+
+  const activeCount = imbalances.filter(
+    (im) => im.ticker === ticker && im.status === 'ACTIVE'
+  ).length
 
   return (
     <div className="space-y-4">
@@ -107,95 +165,48 @@ export default function ChartView({ imbalances, prices }) {
             </button>
           ))}
         </div>
+
         <div className="flex gap-1">
           {TIMEFRAMES.map((tf) => (
             <button
-              key={tf.tv}
-              onClick={() => setTimeframe(tf.tv)}
+              key={tf}
+              onClick={() => setTimeframe(tf)}
               className={`px-3 py-1 rounded text-xs font-bold transition-colors ${
-                timeframe === tf.tv
+                timeframe === tf
                   ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
                   : 'text-gray-500 hover:text-gray-300 bg-[#0e0f15] border border-[#1f2133]'
               }`}
             >
-              {tf.label}
+              {tf}
+              {tf === '4H' && <span className="ml-1 text-yellow-600 font-normal text-[10px]">(1H)</span>}
             </button>
           ))}
         </div>
-        <span className="text-xs text-gray-600 ml-auto">
-          Powered by TradingView · Draw your imbalance zones using the horizontal line tool
-        </span>
-      </div>
 
-      {/* Chart + reference panel */}
-      <div className="flex gap-4" style={{ height: 520 }}>
-        {/* TradingView chart */}
-        <div
-          ref={containerRef}
-          className="flex-1 rounded-lg border border-[#1f2133] overflow-hidden"
-          style={{ minWidth: 0 }}
-        />
-
-        {/* Imbalance reference panel */}
-        <div className="w-64 flex-shrink-0 rounded-lg border border-[#1f2133] bg-[#0e0f15] flex flex-col">
-          <div className="px-3 py-2 border-b border-[#1f2133]">
-            <div className="text-xs font-bold text-gray-500 uppercase tracking-widest">{ticker} Key Levels</div>
-            <div className="text-xs text-gray-700 mt-0.5">All active timeframes</div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            {relevantLevels.length === 0 && (
-              <div className="px-3 py-4 text-xs text-gray-700 text-center">
-                No active {ticker} levels.<br />Add them in + Add Level.
-              </div>
-            )}
-
-            {relevantLevels.map((im) => {
-              const above = currentPrice ? currentPrice < im.midpoint : null
-              const approaching = currentPrice
-                ? Math.abs(currentPrice - im.midpoint) / currentPrice < 0.003
-                : false
-
-              return (
-                <div
-                  key={im.id}
-                  className={`px-3 py-2 border-b border-[#1f2133] ${approaching ? 'bg-orange-900/20' : ''}`}
-                >
-                  <div className="flex items-center justify-between mb-0.5">
-                    <span className="text-xs text-gray-500">{im.timeframe}</span>
-                    <span className={`text-xs font-bold ${im.direction === 'BULLISH' ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {im.direction === 'BULLISH' ? '▲' : '▼'}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-bold text-white">{im.midpoint.toFixed(2)}</span>
-                    {approaching && <span className="text-orange-400 text-xs animate-pulse">● NEAR</span>}
-                    {above !== null && !approaching && (
-                      <span className="text-xs text-gray-600">{above ? 'price below' : 'price above'}</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-gray-700 mt-0.5">
-                    {im.candle_low.toFixed(2)} – {im.candle_high.toFixed(2)}
-                  </div>
-                  {im.notes && (
-                    <div className="text-xs text-gray-600 mt-1 truncate" title={im.notes}>{im.notes}</div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
-
-          {currentPrice && (
-            <div className="px-3 py-2 border-t border-[#1f2133] bg-[#050508]">
-              <div className="text-xs text-gray-600">Current {ticker}</div>
-              <div className="text-sm font-bold text-white">{currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}</div>
-            </div>
+        <div className="flex items-center gap-3 ml-auto text-xs">
+          {loading && <span className="text-gray-500 animate-pulse">Loading…</span>}
+          {error && <span className="text-red-400">{error}</span>}
+          {!loading && !error && (
+            <span className="text-gray-600">
+              {activeCount} active {ticker} level{activeCount !== 1 ? 's' : ''} shown
+            </span>
           )}
         </div>
       </div>
 
-      <div className="text-xs text-gray-700">
-        Tip: Use TradingView's horizontal line tool (hotkey: <span className="text-gray-500">H</span>) to draw your imbalance midpoints directly on the chart.
+      {/* Chart */}
+      <div
+        ref={containerRef}
+        className="rounded-lg border border-[#1f2133] overflow-hidden"
+        style={{ height: 520 }}
+      />
+
+      {/* Legend */}
+      <div className="flex gap-6 text-xs text-gray-600">
+        <span><span className="text-emerald-400 font-bold">- - ▲</span> Bullish demand zone midpoint</span>
+        <span><span className="text-red-400 font-bold">- - ▼</span> Bearish supply zone midpoint</span>
+        <span className="text-gray-700">Dotted lines = zone high/low boundaries</span>
+        <span className="text-gray-700">All active {ticker} levels shown regardless of timeframe filter</span>
       </div>
     </div>
   )
